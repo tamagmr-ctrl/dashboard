@@ -17,6 +17,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Sans',san
 .date-badge{font-size:12px;color:#5F5E5A;background:#fff;border:0.5px solid #d3d1c7;padding:6px 14px;border-radius:20px;white-space:nowrap;}
 .edit-toggle{font-size:12px;font-weight:500;padding:6px 14px;border-radius:20px;border:0.5px solid #d3d1c7;background:#fff;color:#5F5E5A;cursor:pointer;display:flex;align-items:center;gap:5px;transition:all .15s;}
 .edit-toggle.active{background:#1a1a18;color:#fff;border-color:#1a1a18;}
+.hdr-btn{font-size:12px;font-weight:500;padding:6px 14px;border-radius:20px;border:0.5px solid #d3d1c7;background:#fff;color:#5F5E5A;cursor:pointer;display:flex;align-items:center;gap:5px;transition:all .15s;font-family:inherit;}
+.hdr-btn:hover{background:#eeede8;}
+.autosave-toast{position:fixed;bottom:20px;right:20px;background:#1a1a18;color:#fff;font-size:12px;padding:8px 16px;border-radius:20px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:999;display:flex;align-items:center;gap:6px;}
 
 /* ── contenteditable ── */
 [contenteditable]{outline:none;border-radius:4px;transition:background .1s;cursor:text;}
@@ -172,6 +175,11 @@ body.drag-mode .drag-handle{display:flex;}
   </div>
   <div class="header-right">
     <div class="date-badge" id="today-date"></div>
+    <button class="hdr-btn" onclick="exportData()" title="JSONファイルとしてダウンロード"><i class="ti ti-download"></i> 保存</button>
+    <label class="hdr-btn" title="JSONファイルを読み込む" style="cursor:pointer;">
+      <i class="ti ti-upload"></i> 読み込み
+      <input type="file" id="import-file" accept=".json" style="display:none" onchange="importData(event)">
+    </label>
     <button class="edit-toggle" id="edit-toggle" onclick="toggleEditMode()">
       <i class="ti ti-layout-grid"></i> 並び替え
     </button>
@@ -307,6 +315,8 @@ body.drag-mode .drag-handle{display:flex;}
   </div>
 
 </div><!-- /widget-grid -->
+
+<div class="autosave-toast" id="autosave-toast"><i class="ti ti-check"></i> <span id="toast-msg">自動保存しました</span></div>
 
 <script>
 document.getElementById('today-date').textContent =
@@ -790,12 +800,172 @@ function addGanttRow(){
 }
 document.getElementById('new-gantt-name').addEventListener('keydown',e=>{if(e.key==='Enter')addGanttRow();});
 
+// ────────────────────────────────────────────────────────────────
+// PERSISTENCE
+// ────────────────────────────────────────────────────────────────
+const LS_KEY = 'gyomu_dashboard_v1';
+
+function collectState() {
+  // widget order
+  const widgetOrder = [...document.querySelectorAll('.widget-cell')].map(c => ({
+    id: c.dataset.widget,
+    spanFull: c.classList.contains('span-full'),
+  }));
+  // header texts
+  const dashTitle = document.getElementById('dash-title').textContent;
+  const dashSub   = document.getElementById('dash-sub').textContent;
+  // metric labels (4 cards: label + sub)
+  const metricCards = [...document.querySelectorAll('.metric-card')].map(mc => ({
+    label: mc.querySelector('.metric-label span').textContent,
+    sub:   mc.querySelector('.metric-sub span') ? mc.querySelector('.metric-sub span').textContent : '',
+  }));
+  return { tasks, projects, budgets, ganttRows, ganttRangeStart, ganttRangeEnd, members, widgetOrder, dashTitle, dashSub, metricCards };
+}
+
+let _saveTimer = null;
+function scheduleSave() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(saveToLocalStorage, 800);
+}
+
+function saveToLocalStorage() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(collectState()));
+    showToast('自動保存しました', 'ti-check');
+  } catch(e) {
+    showToast('保存に失敗しました', 'ti-alert-triangle');
+  }
+}
+
+function loadFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return false;
+    applyState(JSON.parse(raw));
+    return true;
+  } catch(e) { return false; }
+}
+
+function applyState(s) {
+  if (s.tasks)           tasks           = s.tasks;
+  if (s.projects)        projects        = s.projects;
+  if (s.budgets)         budgets         = s.budgets;
+  if (s.ganttRows)       ganttRows       = s.ganttRows;
+  if (s.ganttRangeStart) ganttRangeStart = s.ganttRangeStart;
+  if (s.ganttRangeEnd)   ganttRangeEnd   = s.ganttRangeEnd;
+  if (s.members)         members         = s.members;
+
+  if (s.dashTitle) document.getElementById('dash-title').textContent = s.dashTitle;
+  if (s.dashSub)   document.getElementById('dash-sub').textContent   = s.dashSub;
+
+  if (s.metricCards) {
+    const cards = [...document.querySelectorAll('.metric-card')];
+    s.metricCards.forEach((mc, i) => {
+      if (!cards[i]) return;
+      const lspan = cards[i].querySelector('.metric-label span');
+      const sspan = cards[i].querySelector('.metric-sub span');
+      if (lspan && mc.label) lspan.textContent = mc.label;
+      if (sspan && mc.sub)   sspan.textContent  = mc.sub;
+    });
+  }
+
+  if (s.widgetOrder) {
+    const grid = document.getElementById('widget-grid');
+    s.widgetOrder.forEach(w => {
+      const cell = grid.querySelector(`[data-widget="${w.id}"]`);
+      if (!cell) return;
+      cell.classList.toggle('span-full', !!w.spanFull);
+      grid.appendChild(cell); // reorder by appending in saved order
+    });
+  }
+}
+
+// Export as JSON file (download)
+function exportData() {
+  const state = collectState();
+  const json  = JSON.stringify(state, null, 2);
+  const blob  = new Blob([json], {type: 'application/json'});
+  const url   = URL.createObjectURL(blob);
+  const a     = document.createElement('a');
+  const now   = new Date();
+  const stamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}`;
+  a.href = url;
+  a.download = `dashboard_${stamp}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('ファイルに保存しました', 'ti-download');
+}
+
+// Import from JSON file
+function importData(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const state = JSON.parse(ev.target.result);
+      applyState(state);
+      renderAll();
+      saveToLocalStorage();
+      showToast('読み込みました', 'ti-check');
+    } catch(err) {
+      showToast('ファイルの読み込みに失敗しました', 'ti-alert-triangle');
+    }
+    e.target.value = ''; // reset input
+  };
+  reader.readAsText(file);
+}
+
+function showToast(msg, icon='ti-check') {
+  const t = document.getElementById('autosave-toast');
+  document.getElementById('toast-msg').textContent = msg;
+  t.querySelector('i').className = 'ti ' + icon;
+  t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.opacity = '0'; }, 2200);
+}
+
+// Patch all mutating functions to trigger autosave
+const _origRenderTasks    = renderTasks;
+const _origRenderProjects = renderProjects;
+const _origRenderBudget   = renderBudget;
+const _origRenderGantt    = renderGantt;
+const _origRenderMembers  = renderMembers;
+
+renderTasks = function(){ _origRenderTasks(); scheduleSave(); };
+renderProjects = function(){ _origRenderProjects(); scheduleSave(); };
+renderBudget = function(){ _origRenderBudget(); scheduleSave(); };
+renderMembers = function(){ _origRenderMembers(); scheduleSave(); };
+
+// Save widget order on drop
+const _origOnDrop = onDrop;
+onDrop = function(e) { _origOnDrop.call(this, e); scheduleSave(); };
+
+// Save contenteditable changes in header
+['dash-title','dash-sub'].forEach(id => {
+  document.getElementById(id).addEventListener('blur', scheduleSave);
+});
+document.querySelectorAll('.metric-card [contenteditable]').forEach(el => {
+  el.addEventListener('blur', scheduleSave);
+});
+
+function renderAll() {
+  renderTasks();
+  renderProjects();
+  renderBudget();
+  initGanttPeriod();
+  _origRenderGantt();
+  scheduleSave();
+}
+
 // ── INIT ─────────────────────────────────────────────────────
+const hadSaved = loadFromLocalStorage();
 renderTasks();
 renderProjects();
 renderBudget();
 initGanttPeriod();
-renderGantt();
+_origRenderGantt();
+if (hadSaved) showToast('前回のデータを復元しました', 'ti-history');
 </script>
 </body>
 </html>
